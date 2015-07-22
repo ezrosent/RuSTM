@@ -1,0 +1,4 @@
+[package]
+name = "ruSTM"
+version = "0.1.0"
+authors = ["Eli Rosenthal <ezr@cs.brown.edu>"]
