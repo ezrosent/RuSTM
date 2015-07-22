@@ -1,4 +1,5 @@
 [package]
 name = "ruSTM"
 version = "0.1.0"
-authors = ["Eli Rosenthal <ezr@cs.brown.edu>"]
+authors = [ "Eli Rosenthal <ezr@cs.brown.edu>",
+            "John Ericson <Ericson2314@Yahoo.com>" ]
