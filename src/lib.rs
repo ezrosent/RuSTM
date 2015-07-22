@@ -38,9 +38,9 @@ trait StmHelper<A> {
     /// A wrapper around an object whose access is mediated by the STM implementation
     type TVar;
 
-    fn read(&mut self, Self::TVar) -> A;
+    fn read(&mut self, &Self::TVar) -> A;
 
-    fn write(&mut self, Self::TVar, A);
+    fn write(&mut self, &Self::TVar, A);
 }
 
 #[test]
