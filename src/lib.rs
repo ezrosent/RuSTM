@@ -66,6 +66,7 @@ mod NoRec {
     use std::collections::HashMap;
     use std::cell::UnsafeCell;
     use std::marker::PhantomData;
+    use std::mem::{transmute, forget, uninitialized};
     use STM;
 
     struct GlobalState {
@@ -74,10 +75,9 @@ mod NoRec {
 
     #[derive(Hash, Eq, PartialEq, Debug, Clone)]
     /// Lies... Lies
-    struct TVarAddr<'a, 'b : 'a>(*mut (), PhantomData<&'a TVar<'b, ()>>);
+    struct TVarAddr<'a, 'b : 'a>(*mut TVar<'b, ()>, PhantomData<&'a TVar<'b, ()>>);
 
 
-<<<<<<< HEAD
     struct LocalState<'v, 'g : 'v> {
         /// the norec paper has the reads stored as a list of <address, value> pairs. For us it
         /// would probably be better to have versioned TVars. That way we always have a fast
@@ -110,8 +110,19 @@ mod NoRec {
         fn validate(&mut self, glob : &'g GlobalState) -> STM::Result<()> {
             loop {
                 let time = glob.version.load(Ordering::SeqCst);
+                if (time & 1) == 0 {
+                    continue;
+                }
+                for &(ref addr, ref version) in self.reads.iter() {
+                    unsafe {
+                        let v = addr.0.clone();
+                        if (*v).version.load(Ordering::SeqCst) != *version {
+                            return STM::Result::abort();
+                        }
+                    }
+                }
+                return STM::Result::ret(());
             }
-            STM::Result::abort()
         }
     }
 
@@ -123,7 +134,7 @@ mod NoRec {
     }
 
     impl<'a, A> TVar<'a, A> {
-        unsafe fn getVal(&self) -> &mut A {
+        unsafe fn get_val(&self) -> &mut A {
             &mut *self.val.get()
         }
     }
