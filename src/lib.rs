@@ -107,7 +107,7 @@ pub mod no_rec {
          *          TXAbort() // abort will longjmp if (time == global lock)
          * return time
          */
-        fn validate(&mut self) -> Result<()> {
+        fn validate(&mut self) -> Result<usize> {
             loop {
                 let time = self.global.version.load(Ordering::SeqCst);
                 if (time & 1) == 0 {
@@ -120,7 +120,7 @@ pub mod no_rec {
                         }
                     }
                 }
-                return Result::ret(());
+                return Result::ret(time);
             }
         }
     }
