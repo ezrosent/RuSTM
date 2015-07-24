@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 pub mod stm {
     use std::result::Result as Either;
     use std::mem::{transmute, forget, uninitialized};
@@ -63,12 +64,13 @@ pub mod no_rec {
     use std::collections::HashMap;
     use std::cell::UnsafeCell;
     use std::marker::PhantomData;
-    use stm::{self, Result};
+    use stm::{Result};
 
     pub struct GlobalState {
         version : AtomicUsize
     }
 
+    #[allow(raw_pointer_derive)]
     #[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
     /// Lies... Lies
     struct TVarAddr<'a, 'b : 'a>(*mut TVar<'b, ()>, PhantomData<&'a TVar<'b, ()>>);
@@ -114,10 +116,8 @@ pub mod no_rec {
                     continue;
                 }
                 for &(addr, version) in &self.reads {
-                    unsafe {
-                        if addr.version().load(Ordering::SeqCst) != version {
-                            return Result::abort();
-                        }
+                    if addr.version().load(Ordering::SeqCst) != version {
+                        return Result::abort();
                     }
                 }
                 return Result::ret(time);
