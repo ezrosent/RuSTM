@@ -77,6 +77,7 @@ mod NoRec {
     struct TVarAddr<'a, 'b : 'a>(*mut (), PhantomData<&'a TVar<'b, ()>>);
 
 
+<<<<<<< HEAD
     struct LocalState<'v, 'g : 'v> {
         /// the norec paper has the reads stored as a list of <address, value> pairs. For us it
         /// would probably be better to have versioned TVars. That way we always have a fast
