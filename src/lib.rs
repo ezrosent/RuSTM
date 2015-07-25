@@ -64,7 +64,8 @@ pub mod no_rec {
     use std::collections::HashMap;
     use std::cell::UnsafeCell;
     use std::marker::PhantomData;
-    use stm::{Result};
+    use std::mem::transmute;
+    use stm::Result;
 
     pub struct GlobalState {
         version : AtomicUsize
@@ -99,17 +100,11 @@ pub mod no_rec {
     }
 
     impl<'v, 'g : 'v> LocalState<'v, 'g> {
-        /*
-         * while (true)
-         * time = global lock
-         * if ((time&1)!=0)
-         *  continue
-         * for each (addr, val) in reads
-         *      if (∗addr != val)
-         *          TXAbort() // abort will longjmp if (time == global lock)
-         * return time
-         */
-        fn validate(&mut self) -> Result<usize> {
+
+        /// Validate the current local state against the state of the world,
+        /// Aborts if a TVar in our readset has been written, otherwise
+        /// returns the version number to with we are consistent
+        fn validate(&self) -> Result<usize> {
             loop {
                 let time = self.global.version.load(Ordering::SeqCst);
                 if (time & 1) == 0 {
@@ -123,8 +118,86 @@ pub mod no_rec {
                 return Result::ret(time);
             }
         }
+
+        /// Acquire reference to value in TVar within the transaction
+        fn read<A>(&mut self, tvar : &'v TVar<'g, A>) -> Result<&A> {
+            let addr = unsafe { tvar.to_addr() } ;
+            if let Some(v) =  self.writes.get(&addr) {
+                // TODO(ezrosent) may not be transmuting the right thing here
+                return unsafe { Result::ret(transmute(v)) };
+            }
+
+            if self.snapshot == self.global.version.load(Ordering::SeqCst) {
+                self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
+                Result::ret(unsafe {tvar.get_val()})
+            } else {
+                self.validate().bind( | v | {
+                    self.snapshot = v;
+                    self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
+                    Result::ret(unsafe {tvar.get_val()})
+                })
+            }
+        }
+
+        /// Add the TVar and value to our writeset, these are thread-local until the
+        /// transaction commits
+        fn write<A : Clone>(&mut self, tvar : &'v mut TVar<'g, A>, val : A) -> Result<()> {
+            //XXX: transmute doesn't work here. It says that Box<[u8]> could be 128 bits, while
+            //Box<A> could be 64 bits.
+
+            /*
+            unsafe {
+                self.writes.insert(tvar.to_addr(), transmute(Box::new(val.clone())));
+            }
+            */
+
+            Result::ret(())
+        }
+
+
+        /// if (read−only transaction)
+        ///     return
+        /// while (!CAS(&global lock, snapshot, snapshot + 1))
+        ///     snapshot = Validate()
+        /// for each (addr, val) in writes
+        ///     ∗addr = val
+        /// global lock = snapshot + 2 // one more than CAS above
+        fn commit(&mut self) -> Result<()> {
+            fn commit_loop(l : &mut LocalState) -> Result<()> {
+               if l.global.version.compare_and_swap(l.snapshot, l.snapshot + 1, Ordering::SeqCst)
+                   == l.snapshot {
+                       Result::ret(())
+               } else {
+                   l.validate().bind(|v| {
+                       l.snapshot = v;
+                       commit_loop(l)
+                   })
+               }
+            }
+            if self.writes.is_empty() {
+                Result::ret(())
+            } else {
+                commit_loop(self).bind(| _ | {
+                    for (addr, value) in &self.writes {
+                        //XXX: how do we safely write back the values now? we need to
+                        //store some size/type-related information now.
+                        //maybe we do want Any? or are we better off just with a
+                        //struct {
+                        //  size
+                        //  A /* size of A is size */
+                        //}
+                        let tvar : &mut TVar<()> =  unsafe { transmute(addr.0) };
+                        tvar.version.fetch_add(1, Ordering::SeqCst);
+                    }
+                    self.global.version.compare_and_swap(self.snapshot + 1,
+                                                         self.snapshot + 2, Ordering::SeqCst);
+                    Result::ret(())
+                })
+            }
+        }
     }
 
+    /// Haskell-style container of mutable state within a transaction
     pub struct TVar<'a, A> {
         version : AtomicUsize,
         val : UnsafeCell<A>,
@@ -139,10 +212,12 @@ pub mod no_rec {
         unsafe fn get_val_mut(&self) -> &mut A {
             &mut *self.val.get()
         }
+        unsafe fn to_addr<'b>(&'b self) -> TVarAddr<'b, 'a> {
+            let ptr : *mut TVar<'a, ()> = transmute(self);
+            TVarAddr(ptr, PhantomData)
+        }
     }
 
-    //impl<'a, A> stm::TVar<A> for TVar<'a, A> {
-    //}
 }
 
 #[test]
