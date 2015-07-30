@@ -72,7 +72,7 @@ pub mod no_rec {
     }
 
     #[allow(raw_pointer_derive)]
-    #[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
+    #[derive(Hash, Eq, PartialEq, Copy, Clone)]
     /// Lies... Lies
     struct TVarAddr<'a, 'b : 'a>(*mut TVar<'b, ()>, PhantomData<&'a TVar<'b, ()>>);
 
@@ -120,37 +120,33 @@ pub mod no_rec {
         }
 
         /// Acquire reference to value in TVar within the transaction
-        fn read<A>(&mut self, tvar : &'v TVar<'g, A>) -> Result<&A> {
-            let addr = unsafe { tvar.to_addr() } ;
-            if let Some(v) =  self.writes.get(&addr) {
-                // TODO(ezrosent) may not be transmuting the right thing here
-                return unsafe { Result::ret(transmute(v)) };
-            }
+        fn read<'l, A>(&'l mut self, tvar : &'l TVar<'g, A>) -> Result<&'l A>
+            where 'v : 'l {
+                let addr : TVarAddr<'l, 'g> = unsafe { tvar.to_addr() } ;
+                if let Some(v) = self.writes.get(&addr) {
+                    let r : &'l [u8] = &*v;
+                    return Result::abort();
+                }
 
-            if self.snapshot == self.global.version.load(Ordering::SeqCst) {
-                self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
-                Result::ret(unsafe {tvar.get_val()})
-            } else {
-                self.validate().bind( | v | {
-                    self.snapshot = v;
+                if self.snapshot == self.global.version.load(Ordering::SeqCst) {
                     self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
-                    Result::ret(unsafe {tvar.get_val()})
-                })
-            }
+                    unsafe {tvar.get_val()}
+                } else {
+                    self.validate().bind( | v | {
+                        self.snapshot = v;
+                        self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
+                        unsafe {tvar.get_val()}
+                    })
+                }
         }
 
         /// Add the TVar and value to our writeset, these are thread-local until the
         /// transaction commits
-        fn write<A : Clone>(&mut self, tvar : &'v mut TVar<'g, A>, val : A) -> Result<()> {
-            //XXX: transmute doesn't work here. It says that Box<[u8]> could be 128 bits, while
-            //Box<A> could be 64 bits.
-
-            /*
+        fn write<A : Copy>(&mut self, tvar : &'v mut TVar<'g, A>, val : A) -> Result<()> {
+            let b : Box<[A]> = Box::new([val]);
             unsafe {
-                self.writes.insert(tvar.to_addr(), transmute(Box::new(val.clone())));
+                self.writes.insert(tvar.to_addr(), transmute(b));
             }
-            */
-
             Result::ret(())
         }
 
@@ -198,12 +194,14 @@ pub mod no_rec {
     }
 
     /// Haskell-style container of mutable state within a transaction
+    //pub struct TVar<'a, A: ?Sized> {
     pub struct TVar<'a, A> {
         version : AtomicUsize,
+        global : &'a GlobalState,
         val : UnsafeCell<A>,
-        global : &'a GlobalState
     }
 
+    //impl<'a, A: ?Sized> TVar<'a, A> {
     impl<'a, A> TVar<'a, A> {
         unsafe fn get_val(&self) -> &A {
             &*self.val.get()
