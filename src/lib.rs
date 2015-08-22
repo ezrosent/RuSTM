@@ -120,24 +120,30 @@ pub mod no_rec {
         }
 
         /// Acquire reference to value in TVar within the transaction
-        fn read<'l, A>(&'l mut self, tvar : &'l TVar<'g, A>) -> Result<&'l A>
-            where 'v : 'l {
-                let addr : TVarAddr<'l, 'g> = unsafe { tvar.to_addr() } ;
-                if let Some(v) = self.writes.get(&addr) {
-                    let r : &'l [u8] = &*v;
-                    return Result::abort();
-                }
+        fn read<'l, A>(&'l mut self, tvar : &'v TVar<'g, A>) -> Result<&'l A>
+            where 'v : 'l
+        {
+            let addr : TVarAddr<'v, 'g> = unsafe { tvar.to_addr() } ;
 
-                if self.snapshot == self.global.version.load(Ordering::SeqCst) {
+            // Should be &&'l ? 
+            if let Some(v) = self.writes.get(&addr) {
+                let r : && [u8] = &&**v;
+                assert_eq!(r.len(), ::std::mem::size_of::<A>());
+                let r2 : && A = unsafe { transmute(r) };
+                return Result::ret(r2)
+            }
+            
+            if self.snapshot == self.global.version.load(Ordering::SeqCst) {
+                self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
+                Result::ret(unsafe {tvar.get_val()})
+            } else {
+                self.validate().bind( | v | {
+                    assert!(self.snapshot <= v);
+                    self.snapshot = v;
                     self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
-                    unsafe {tvar.get_val()}
-                } else {
-                    self.validate().bind( | v | {
-                        self.snapshot = v;
-                        self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
-                        unsafe {tvar.get_val()}
-                    })
-                }
+                    Result::ret(unsafe {tvar.get_val()})
+                })
+            }
         }
 
         /// Add the TVar and value to our writeset, these are thread-local until the
@@ -182,7 +188,7 @@ pub mod no_rec {
                         //  size
                         //  A /* size of A is size */
                         //}
-                        let tvar : &mut TVar<()> =  unsafe { transmute(addr.0) };
+                        let tvar : &TVar<u8> =  unsafe { transmute(addr.0) };
                         tvar.version.fetch_add(1, Ordering::SeqCst);
                     }
                     self.global.version.compare_and_swap(self.snapshot + 1,
@@ -194,15 +200,13 @@ pub mod no_rec {
     }
 
     /// Haskell-style container of mutable state within a transaction
-    //pub struct TVar<'a, A: ?Sized> {
-    pub struct TVar<'a, A> {
+    pub struct TVar<'a, A: ?Sized> {
         version : AtomicUsize,
         global : &'a GlobalState,
         val : UnsafeCell<A>,
     }
 
-    //impl<'a, A: ?Sized> TVar<'a, A> {
-    impl<'a, A> TVar<'a, A> {
+    impl<'a, A: ?Sized> TVar<'a, A> {
         unsafe fn get_val(&self) -> &A {
             &*self.val.get()
         }
@@ -211,8 +215,8 @@ pub mod no_rec {
             &mut *self.val.get()
         }
         unsafe fn to_addr<'b>(&'b self) -> TVarAddr<'b, 'a> {
-            let ptr : *mut TVar<'a, ()> = transmute(self);
-            TVarAddr(ptr, PhantomData)
+            let ptr : &*mut TVar<'a, ()> = transmute(&self);
+            TVarAddr(*ptr, PhantomData)
         }
     }
 
