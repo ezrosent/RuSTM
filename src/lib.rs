@@ -1,3 +1,5 @@
+#![feature(raw, slice_bytes)]
+
 use std::result::Result as Either;
 use std::mem::{transmute, forget, uninitialized};
 use std::ptr::swap;

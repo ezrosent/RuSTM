@@ -1,28 +1,17 @@
-#![allow(unused)]
-#![allow(raw_pointer_derive)]
+//#![allow(unused)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
 use std::collections::HashMap;
 use std::cell::UnsafeCell;
-use std::marker::PhantomData;
-use std::mem::transmute;
+use std::hash::{Hash, Hasher};
+use std::mem::{align_of, size_of_val, transmute};
+use std::slice::bytes::copy_memory;
 
 use ::Result;
 
 pub struct GlobalState {
     version : AtomicUsize
-}
-
-#[allow(raw_pointer_derive)]
-#[derive(Hash, Eq, PartialEq, Copy, Clone)]
-/// Lies... Lies
-struct TVarAddr<'a, 'b : 'a>(*mut TVar<'b, ()>, PhantomData<&'a TVar<'b, ()>>);
-
-impl<'a, 'b : 'a> TVarAddr<'a, 'b> {
-    fn version(self) -> &'a AtomicUsize {
-        unsafe { &(*self.0).version }
-    }
 }
 
 pub struct LocalState<'v, 'g : 'v> {
@@ -47,7 +36,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
     /// Validate the current local state against the state of the world,
     /// Aborts if a TVar in our readset has been written, otherwise
     /// returns the version number to with we are consistent
-    fn validate(&self) -> Result<usize> {
+    pub fn validate(&self) -> Result<usize> {
         loop {
             let time = self.global.version.load(Ordering::SeqCst);
             if (time & 1) == 0 {
@@ -63,19 +52,19 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
     }
 
     /// Acquire reference to value in TVar within the transaction
-    fn read<'l, A>(&'l mut self, tvar : &'v TVar<'g, A>) -> Result<&'l A>
+    pub fn read<'l, A>(&'l mut self, tvar : &'v TVar<'g, A>) -> Result<&'l A>
         where 'v : 'l
     {
         let addr : TVarAddr<'v, 'g> = unsafe { tvar.to_addr() } ;
 
-        // Should be &&'l ? 
+        // Should be &&'l ?
         if let Some(v) = self.writes.get(&addr) {
             let r : && [u8] = &&**v;
             assert_eq!(r.len(), ::std::mem::size_of::<A>());
             let r2 : && A = unsafe { transmute(r) };
             return Result::ret(r2)
         }
-        
+
         if self.snapshot == self.global.version.load(Ordering::SeqCst) {
             self.reads.push((addr, tvar.version.load(Ordering::SeqCst)));
             Result::ret(unsafe {tvar.get_val()})
@@ -91,7 +80,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
 
     /// Add the TVar and value to our writeset, these are thread-local until the
     /// transaction commits
-    fn write<A : Copy>(&mut self, tvar : &'v mut TVar<'g, A>, val : A) -> Result<()> {
+    pub fn write<A : Copy>(&mut self, tvar : &'v mut TVar<'g, A>, val : A) -> Result<()> {
         let b : Box<[A]> = Box::new([val]);
         unsafe {
             self.writes.insert(tvar.to_addr(), transmute(b));
@@ -107,7 +96,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
     /// for each (addr, val) in writes
     ///     ∗addr = val
     /// global lock = snapshot + 2 // one more than CAS above
-    fn commit(&mut self) -> Result<()> {
+    pub fn commit(&mut self) -> Result<()> {
         fn commit_loop(l : &mut LocalState) -> Result<()> {
             if l.global.version.compare_and_swap(l.snapshot, l.snapshot + 1, Ordering::SeqCst)
                 == l.snapshot {
@@ -124,15 +113,10 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
         } else {
             commit_loop(self).bind(| _ | {
                 for (addr, value) in &self.writes {
-                    //XXX: how do we safely write back the values now? we need to
-                    //store some size/type-related information now.
-                    //maybe we do want Any? or are we better off just with a
-                    //struct {
-                    //  size
-                    //  A /* size of A is size */
-                    //}
-                    let tvar : &TVar<u8> =  unsafe { transmute(addr.0) };
-                    tvar.version.fetch_add(1, Ordering::SeqCst);
+                    let dst = unsafe { addr.aligned_mem() };
+                    debug_assert_eq!(value.len(), dst.len());
+                    copy_memory(value, dst);
+                    addr.addr.version.fetch_add(1, Ordering::SeqCst);
                 }
                 self.global.version.compare_and_swap(self.snapshot + 1,
                                                      self.snapshot + 2, Ordering::SeqCst);
@@ -141,6 +125,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
         }
     }
 }
+
 
 /// Haskell-style container of mutable state within a transaction
 pub struct TVar<'a, A: ?Sized> {
@@ -157,8 +142,75 @@ impl<'a, A: ?Sized> TVar<'a, A> {
     unsafe fn get_val_mut(&self) -> &mut A {
         &mut *self.val.get()
     }
+}
+impl<'a, A> TVar<'a, A> {
     unsafe fn to_addr<'b>(&'b self) -> TVarAddr<'b, 'a> {
-        let ptr : &*mut TVar<'a, ()> = transmute(&self);
-        TVarAddr(*ptr, PhantomData)
+        use std::raw::Slice;
+        let fat_ptr = Slice::<u8> {
+            data: transmute(self),
+            len: size_of_val(self),
+        };
+        //let ptr : &*mut TVar<'a, [u8]> = transmute(self));
+        TVarAddr {
+            align: align_of::<A>(),
+            addr: transmute(fat_ptr),
+        }
     }
+}
+
+#[derive(Copy, Clone)]
+/// Lies... Lies
+struct TVarAddr<'a, 'b : 'a> {
+    align: usize,
+    addr: &'a TVar<'b, [u8]>, //*mut
+    //_phan: PhantomData<&'a TVar<'b, ()>>,
+}
+
+impl<'a, 'b : 'a> Hash for TVarAddr<'a, 'b> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw_addr().hash(state);
+    }
+}
+
+impl<'a, 'b : 'a> Eq for TVarAddr<'a, 'b> {}
+
+impl<'a, 'b : 'a> PartialEq for TVarAddr<'a, 'b> {
+    fn eq(&self, other: &Self) -> bool {
+        let c = self.raw_addr() == other.raw_addr();
+        if c {
+            debug_assert_eq!(self.raw_len(), other.raw_len());
+            debug_assert_eq!(self.align, other.align);
+        }
+        c
+    }
+}
+
+impl<'a, 'b : 'a> TVarAddr<'a, 'b> {
+    fn raw_addr(self) -> usize {
+        self.addr as *const _ as *const () as usize
+    }
+
+    fn raw_len(self) -> usize {
+        let y = self.addr.val.get();
+        unsafe { transmute::<_,&[u8]>(y).len() }
+    }
+
+    unsafe fn aligned_mem(self) -> &'a mut [u8] {
+        let buf = self.addr.val.get();
+        let p = buf as *mut () as usize;
+        // Assumes alignment is power of 2
+        let o = ((p + (self.align - 1)) & self.align) - p;
+        &mut (*buf)[o..]
+    }
+
+    fn version(self) -> &'a AtomicUsize {
+        &(*self.addr).version
+    }
+}
+
+
+
+pub fn align_down_mut<T>(sp: *mut T, n: usize) -> *mut T {
+  let sp = (sp as usize) & !(n - 1);
+  sp as *mut T
 }
