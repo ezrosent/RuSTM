@@ -18,7 +18,9 @@ impl<A> Result<A> {
     }
 
     /// just don't look
-    fn spec_move(mut self) -> Either<A, ()> {
+    /// TODO: use a different linear-types library. Currently using this
+    /// in calling code
+    pub fn spec_move(mut self) -> Either<A, ()> {
         unsafe {
             let mut x = uninitialized();
             swap(&mut x, transmute(&mut self));

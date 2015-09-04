@@ -14,6 +14,41 @@ pub struct GlobalState {
     version : AtomicUsize
 }
 
+/// Baseline implementation of GlobalState, currently do not hqve the aid of the compiler, so this
+/// may have major issues.
+/// TODO: make a proper implementation of the GlobalState trait
+impl GlobalState {
+    fn newLocal<'v, 'g>(&'g self) -> LocalState<'v, 'g> {
+        LocalState {
+            reads: Vec::new(),
+            writes: HashMap::new(),
+            global: self,
+            snapshot: self.version.load(Ordering::SeqCst),
+        }
+    }
+
+    pub fn run<A, F>(&self, mut func : F) -> A
+    where F: FnMut(&mut LocalState) -> Result<A> {
+        let mut local = self.newLocal();
+        match func(&mut local).spec_move() {
+            Ok(r) => r,
+            _ => self.run(func)
+        }
+    }
+
+    pub fn or_else<A, F, G>(&self, mut func1 : F, func2 : G) -> A
+        where F: FnMut(&mut LocalState) -> Result<A>,
+              G: FnMut(&mut LocalState) -> Result<A> {
+            let mut local1 = self.newLocal();
+            match func1(&mut local1).spec_move() {
+                Ok(r) => r,
+                //TODO: this may not work, compiler may not know that
+                //local1, which borrows self, has relinquised ownership
+                _ => self.run(func2)
+            }
+    }
+}
+
 pub struct LocalState<'v, 'g : 'v> {
     /// the norec paper has the reads stored as a list of <address, value> pairs. For us it
     /// would probably be better to have versioned TVars. That way we always have a fast
@@ -25,6 +60,7 @@ pub struct LocalState<'v, 'g : 'v> {
     writes : HashMap<TVarAddr<'v, 'g>, Box<[u8]>>,
 
     /// STM environment we are using
+    /// TODO: how are we getting away with this not being a mutable reference?
     global : &'g GlobalState,
 
     /// last version at which our view of the global state was valid
@@ -98,15 +134,14 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
     /// global lock = snapshot + 2 // one more than CAS above
     pub fn commit(&mut self) -> Result<()> {
         fn commit_loop(l : &mut LocalState) -> Result<()> {
-            if l.global.version.compare_and_swap(l.snapshot, l.snapshot + 1, Ordering::SeqCst)
-                == l.snapshot {
-                    Result::ret(())
-                } else {
-                    l.validate().bind(|v| {
-                        l.snapshot = v;
-                        commit_loop(l)
-                    })
-                }
+            if l.global.version.compare_and_swap(l.snapshot, l.snapshot + 1, Ordering::SeqCst) == l.snapshot {
+                Result::ret(())
+            } else {
+                l.validate().bind(|v| {
+                    l.snapshot = v;
+                    commit_loop(l)
+                })
+            }
         }
         if self.writes.is_empty() {
             Result::ret(())
@@ -128,6 +163,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
 
 
 /// Haskell-style container of mutable state within a transaction
+/// TODO: impl TVar trait
 pub struct TVar<'a, A: ?Sized> {
     version : AtomicUsize,
     global : &'a GlobalState,
@@ -207,8 +243,6 @@ impl<'a, 'b : 'a> TVarAddr<'a, 'b> {
         &(*self.addr).version
     }
 }
-
-
 
 pub fn align_down_mut<T>(sp: *mut T, n: usize) -> *mut T {
   let sp = (sp as usize) & !(n - 1);
