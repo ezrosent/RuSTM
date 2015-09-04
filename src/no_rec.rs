@@ -192,6 +192,18 @@ impl<'a, A> TVar<'a, A> {
             addr: transmute(fat_ptr),
         }
     }
+
+    ///TODO: change trait API to use this signature
+    fn read<'l, 'b> (&'b mut self, l: &'l mut LocalState<'b, 'a>) -> Result<&'l A> {
+        l.read(self)
+    }
+
+}
+impl<'a, A : Copy> TVar<'a, A> {
+    ///TODO: change trait API to use this signature
+    fn write<'l, 'b>(&'b mut self, l: &'l mut LocalState<'b, 'a>, arg : A) -> Result<()> {
+        l.write(self, arg)
+    }
 }
 
 #[derive(Copy, Clone)]
