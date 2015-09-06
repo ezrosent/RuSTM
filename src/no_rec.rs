@@ -1,6 +1,7 @@
 //#![allow(unused)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::vec::Vec;
 use std::collections::HashMap;
 use std::cell::UnsafeCell;
@@ -10,21 +11,35 @@ use std::slice::bytes::copy_memory;
 
 use ::Result;
 
-pub struct GlobalState {
-    version : AtomicUsize
-}
+pub struct GlobalState { version : AtomicUsize }
 
 /// Baseline implementation of GlobalState, currently do not hqve the aid of the compiler, so this
 /// may have major issues.
 /// TODO: make a proper implementation of the GlobalState trait
 impl GlobalState {
-    fn newLocal<'v, 'g>(&'g self) -> LocalState<'v, 'g> {
+    fn newLocal<'l, 'g>(&'g self) -> LocalState<'l, 'g> {
         LocalState {
             reads: Vec::new(),
             writes: HashMap::new(),
             global: self,
             snapshot: self.version.load(Ordering::SeqCst),
         }
+    }
+
+    pub fn retry<A, F>(&self, l: &mut LocalState, mut func: F) -> A
+    where F: FnMut(&mut LocalState) -> Result<A> {
+        let mtx = Mutex::new(false);
+        let cv = Condvar::new();
+        for &(addr, size) in &l.reads {
+            addr.waiters().push((&mtx, &cv));
+        }
+        {
+            let mut done = mtx.lock().unwrap();
+            while !*done {
+                done = cv.wait(done).unwrap();
+            }
+        }
+        self.run(func)
     }
 
     pub fn run<A, F>(&self, mut func : F) -> A
@@ -91,7 +106,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
     pub fn read<'l, A>(&'l mut self, tvar : &'v TVar<'g, A>) -> Result<&'l A>
         where 'v : 'l
     {
-        let addr : TVarAddr<'v, 'g> = unsafe { tvar.to_addr() } ;
+        let addr: TVarAddr<'v, 'g> = unsafe { tvar.to_addr() } ;
 
         // Should be &&'l ?
         if let Some(v) = self.writes.get(&addr) {
@@ -152,6 +167,12 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
                     debug_assert_eq!(value.len(), dst.len());
                     copy_memory(value, dst);
                     addr.addr.version.fetch_add(1, Ordering::SeqCst);
+                    for &(mtx, cv) in &addr.addr.waiters {
+                        let mut done = mtx.lock().unwrap();
+                        *done = true;
+                        cv.notify_all();
+                    }
+                    //TODO: set waiters to empty
                 }
                 self.global.version.compare_and_swap(self.snapshot + 1,
                                                      self.snapshot + 2, Ordering::SeqCst);
@@ -165,7 +186,12 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
 /// Haskell-style container of mutable state within a transaction
 /// TODO: impl TVar trait
 pub struct TVar<'a, A: ?Sized> {
+    //TODO add in mutex/cv pair for waiting for explicit aborts
+    //This includes an explicit abort() command (as opposed to failing validation,
+    //which should cause an immediate retry).
     version : AtomicUsize,
+    //TODO this can be of lifetime 'b : 'a
+    waiters : Vec<(&'a Mutex<bool>, &'a Condvar)>,
     global : &'a GlobalState,
     val : UnsafeCell<A>,
 }
@@ -179,6 +205,7 @@ impl<'a, A: ?Sized> TVar<'a, A> {
         &mut *self.val.get()
     }
 }
+
 impl<'a, A> TVar<'a, A> {
     unsafe fn to_addr<'b>(&'b self) -> TVarAddr<'b, 'a> {
         use std::raw::Slice;
@@ -253,6 +280,9 @@ impl<'a, 'b : 'a> TVarAddr<'a, 'b> {
 
     fn version(self) -> &'a AtomicUsize {
         &(*self.addr).version
+    }
+    fn waiters(self) -> &'a mut Vec<(&'b Mutex<bool>, &'b Condvar)> {
+        panic!("nyi")
     }
 }
 
