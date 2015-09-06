@@ -12,8 +12,6 @@ use ::Result;
 
 pub struct GlobalState { version : AtomicUsize }
 
-/// Baseline implementation of GlobalState, currently do not hqve the aid of the compiler, so this
-/// may have major issues.
 /// TODO: make a proper implementation of the GlobalState trait
 impl GlobalState {
     fn new_local<'l, 'g>(&'g self) -> LocalState<'l, 'g> {
