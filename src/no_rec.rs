@@ -45,12 +45,12 @@ impl GlobalState {
     }
 
     pub fn run<A, F>(&self, mut func : F) -> A
-    where F: FnMut(&mut LocalState) -> Result<A> {
-        let mut local = self.newLocal();
-        match func(&mut local).spec_move() {
-            Ok(r) => r,
-            _ => self.run(func)
-        }
+        where F: FnMut(&mut LocalState) -> Result<A> {
+            let mut local = self.newLocal();
+            match func(&mut local).spec_move() {
+                Ok(r) => r,
+                _ => self.run(func)
+            }
     }
 
     pub fn or_else<A, F, G>(&self, mut func1 : F, func2 : G) -> A
@@ -179,10 +179,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
                         *done = true;
                         cv.notify_all();
                     }
-                    // this is safe because we hold the sequence lock
                     waiters.clear();
-                    //addr.waiters().clear();
-                    //TODO: set waiters to empty
                 }
                 self.global
                     .version
