@@ -1,7 +1,7 @@
 //#![allow(unused)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, Arc};
 use std::vec::Vec;
 use std::collections::HashMap;
 use std::cell::UnsafeCell;
@@ -28,16 +28,19 @@ impl GlobalState {
 
     pub fn retry<A, F>(&self, l: &mut LocalState, mut func: F) -> A
     where F: FnMut(&mut LocalState) -> Result<A> {
-        let mtx = Mutex::new(false);
-        let cv = Condvar::new();
+        let bx = Arc::new((Mutex::new(false), Condvar::new()));
         for &(addr, size) in &l.reads {
-            addr.waiters().push((&mtx, &cv));
+            let mut waiters = addr.addr.waiters.lock().unwrap();
+            // this is actually unsafe...
+            // maybe protect waiters with a lock
+            waiters.push(bx.clone());
+            //addr.waiters().push((&mtx, &cv));
         }
-        {
-            let mut done = mtx.lock().unwrap();
-            while !*done {
-                done = cv.wait(done).unwrap();
-            }
+        // currently wont compile because bx is moved
+        let (ref mtx, ref cv) = *bx;
+        let mut done = mtx.lock().unwrap();
+        while !*done {
+            done = cv.wait(done).unwrap();
         }
         self.run(func)
     }
@@ -149,7 +152,9 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
     /// global lock = snapshot + 2 // one more than CAS above
     pub fn commit(&mut self) -> Result<()> {
         fn commit_loop(l : &mut LocalState) -> Result<()> {
-            if l.global.version.compare_and_swap(l.snapshot, l.snapshot + 1, Ordering::SeqCst) == l.snapshot {
+            if l.global
+                .version
+                .compare_and_swap(l.snapshot, l.snapshot + 1, Ordering::SeqCst) == l.snapshot {
                 Result::ret(())
             } else {
                 l.validate().bind(|v| {
@@ -162,20 +167,27 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
             Result::ret(())
         } else {
             commit_loop(self).bind(| _ | {
-                for (addr, value) in &self.writes {
+                for (mut addr, value) in &self.writes {
                     let dst = unsafe { addr.aligned_mem() };
                     debug_assert_eq!(value.len(), dst.len());
                     copy_memory(value, dst);
                     addr.addr.version.fetch_add(1, Ordering::SeqCst);
-                    for &(mtx, cv) in &addr.addr.waiters {
+                    //TODO: DCLP if this is too slow in the common case that waiters is empty
+                    let mut waiters = addr.addr.waiters.lock().unwrap();
+                    for bx in &*waiters {
+                        let (ref mtx, ref cv) = **bx;
                         let mut done = mtx.lock().unwrap();
                         *done = true;
                         cv.notify_all();
                     }
+                    // this is safe because we hold the sequence lock
+                    waiters.clear();
+                    //addr.waiters().clear();
                     //TODO: set waiters to empty
                 }
-                self.global.version.compare_and_swap(self.snapshot + 1,
-                                                     self.snapshot + 2, Ordering::SeqCst);
+                self.global
+                    .version
+                    .compare_and_swap(self.snapshot + 1, self.snapshot + 2, Ordering::SeqCst);
                 Result::ret(())
             })
         }
@@ -191,7 +203,7 @@ pub struct TVar<'a, A: ?Sized> {
     //which should cause an immediate retry).
     version : AtomicUsize,
     //TODO this can be of lifetime 'b : 'a
-    waiters : Vec<(&'a Mutex<bool>, &'a Condvar)>,
+    waiters : Mutex<Vec<Arc<(Mutex<bool>, Condvar)>>>,
     global : &'a GlobalState,
     val : UnsafeCell<A>,
 }
@@ -281,6 +293,7 @@ impl<'a, 'b : 'a> TVarAddr<'a, 'b> {
     fn version(self) -> &'a AtomicUsize {
         &(*self.addr).version
     }
+
     fn waiters(self) -> &'a mut Vec<(&'b Mutex<bool>, &'b Condvar)> {
         panic!("nyi")
     }
