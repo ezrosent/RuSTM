@@ -194,11 +194,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
 /// Haskell-style container of mutable state within a transaction
 /// TODO: impl TVar trait
 pub struct TVar<'a, A: ?Sized> {
-    //TODO add in mutex/cv pair for waiting for explicit aborts
-    //This includes an explicit abort() command (as opposed to failing validation,
-    //which should cause an immediate retry).
     version : AtomicUsize,
-    //TODO this can be of lifetime 'b : 'a
     waiters : Mutex<Vec<Arc<(Mutex<bool>, Condvar)>>>,
     global : &'a GlobalState,
     val : UnsafeCell<A>,
