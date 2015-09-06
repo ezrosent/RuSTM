@@ -17,7 +17,7 @@ pub struct GlobalState { version : AtomicUsize }
 /// may have major issues.
 /// TODO: make a proper implementation of the GlobalState trait
 impl GlobalState {
-    fn newLocal<'l, 'g>(&'g self) -> LocalState<'l, 'g> {
+    fn new_local<'l, 'g>(&'g self) -> LocalState<'l, 'g> {
         LocalState {
             reads: Vec::new(),
             writes: HashMap::new(),
@@ -26,15 +26,12 @@ impl GlobalState {
         }
     }
 
-    pub fn retry<A, F>(&self, l: &mut LocalState, mut func: F) -> A
-    where F: FnMut(&mut LocalState) -> Result<A> {
+    pub fn retry<A, F>(&self, l: &mut LocalState, func: F) -> A
+        where F: FnMut(&mut LocalState) -> Result<A>
+    {
         let bx = Arc::new((Mutex::new(false), Condvar::new()));
-        for &(addr, size) in &l.reads {
-            let mut waiters = addr.addr.waiters.lock().unwrap();
-            // this is actually unsafe...
-            // maybe protect waiters with a lock
-            waiters.push(bx.clone());
-            //addr.waiters().push((&mtx, &cv));
+        for &(addr, _) in &l.reads {
+            addr.addr.waiters.lock().unwrap().push(bx.clone());
         }
         let (ref mtx, ref cv) = *bx;
         let mut done = mtx.lock().unwrap();
@@ -45,24 +42,26 @@ impl GlobalState {
     }
 
     pub fn run<A, F>(&self, mut func : F) -> A
-        where F: FnMut(&mut LocalState) -> Result<A> {
-            let mut local = self.newLocal();
-            match func(&mut local).spec_move() {
-                Ok(r) => r,
-                _ => self.run(func)
-            }
+        where F: FnMut(&mut LocalState) -> Result<A>
+    {
+        let mut local = self.new_local();
+        match func(&mut local).spec_move() {
+            Ok(r) => r,
+            _ => self.run(func)
+        }
     }
 
     pub fn or_else<A, F, G>(&self, mut func1 : F, func2 : G) -> A
         where F: FnMut(&mut LocalState) -> Result<A>,
-              G: FnMut(&mut LocalState) -> Result<A> {
-            let mut local1 = self.newLocal();
-            match func1(&mut local1).spec_move() {
-                Ok(r) => r,
-                //TODO: this may not work, compiler may not know that
-                //local1, which borrows self, has relinquised ownership
-                _ => self.run(func2)
-            }
+              G: FnMut(&mut LocalState) -> Result<A>
+    {
+        let mut local1 = self.new_local();
+        match func1(&mut local1).spec_move() {
+            Ok(r) => r,
+            //TODO: this may not work, compiler may not know that
+            //local1, which borrows self, has relinquised ownership
+            _ => self.run(func2)
+        }
     }
 }
 
@@ -166,7 +165,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
             Result::ret(())
         } else {
             commit_loop(self).bind(| _ | {
-                for (mut addr, value) in &self.writes {
+                for (addr, value) in &self.writes {
                     let dst = unsafe { addr.aligned_mem() };
                     debug_assert_eq!(value.len(), dst.len());
                     copy_memory(value, dst);
@@ -196,7 +195,7 @@ impl<'v, 'g : 'v> LocalState<'v, 'g> {
 pub struct TVar<'a, A: ?Sized> {
     version : AtomicUsize,
     waiters : Mutex<Vec<Arc<(Mutex<bool>, Condvar)>>>,
-    global : &'a GlobalState,
+    global : &'a GlobalState, //TODO: remove this?
     val : UnsafeCell<A>,
 }
 
@@ -284,10 +283,6 @@ impl<'a, 'b : 'a> TVarAddr<'a, 'b> {
 
     fn version(self) -> &'a AtomicUsize {
         &(*self.addr).version
-    }
-
-    fn waiters(self) -> &'a mut Vec<(&'b Mutex<bool>, &'b Condvar)> {
-        panic!("nyi")
     }
 }
 
