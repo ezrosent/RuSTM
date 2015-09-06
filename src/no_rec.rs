@@ -36,7 +36,6 @@ impl GlobalState {
             waiters.push(bx.clone());
             //addr.waiters().push((&mtx, &cv));
         }
-        // currently wont compile because bx is moved
         let (ref mtx, ref cv) = *bx;
         let mut done = mtx.lock().unwrap();
         while !*done {
